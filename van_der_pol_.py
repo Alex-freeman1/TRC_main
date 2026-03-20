@@ -62,6 +62,8 @@ DT    = 0.05
 T     = 100
 U_MIN = -2.0
 U_MAX = 2.0
+
+
 Q     = np.diag([10.0, 5.0])
 R     = 0.5
 Q_F   = 20.0 * Q
@@ -79,9 +81,18 @@ import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
 
 
+
+'''
+Van Der Pol dynamics 
+'''
 def vdp_np(x, u):
     return np.array([x[1], MU * (1 - x[0]**2) * x[1] - x[0] + float(u)])
 
+
+
+'''
+Runge-kutta gen 4 method for integration
+'''
 
 def rk4_np(x, u):
     k1 = vdp_np(x, u)
@@ -91,6 +102,9 @@ def rk4_np(x, u):
     return x + (DT / 6) * (k1 + 2 * k2 + 2 * k3 + k4)
 
 
+'''
+Extrapolate time sequence using rk4 integrator
+'''
 def rollout_np(x0, u_seq):
     states = np.zeros((T + 1, 2), dtype=np.float64)
     states[0] = x0
@@ -99,13 +113,25 @@ def rollout_np(x0, u_seq):
     return states
 
 
+'''
+Calculate the integral, J,  using discrete time 
+'''
 def cost_np(u_seq, x0):
     states = rollout_np(x0, u_seq)
+    
+    # Discretly adds state vectors and control inputs weighting
     J = sum(states[t] @ Q @ states[t] + R * u_seq[t]**2 for t in range(T))
+    
+    # Adds the final weighting, Q_f
     J += states[T] @ Q_F @ states[T]
     return float(J)
 
 
+
+'''
+Find the gradient of J, \nabla J. 
+Uses the costate (adjoint) method and sweeps back in time. 
+'''
 def cost_grad_np(u_seq, x0):
     states = rollout_np(x0, u_seq)
     costate = 2.0 * Q_F @ states[T]
@@ -124,6 +150,10 @@ def cost_grad_np(u_seq, x0):
     return grad
 
 
+
+'''
+Solves one singular optimal control input u*
+'''
 def solve_one(x0):
     return minimize(
         cost_np,
@@ -135,7 +165,9 @@ def solve_one(x0):
         options={'maxiter': 300, 'ftol': 1e-8},
     )
 
-
+'''
+This function solves the problem and collects everything required
+'''
 def _solve_one_payload(x0):
     result = solve_one(x0)
     u_opt = np.clip(result.x, U_MIN, U_MAX)
@@ -197,6 +229,7 @@ def main():
     
     def generate_dataset(n, seed=42, verbose_every=100, parallel=True, workers=None):
         rng = np.random.RandomState(seed)
+        
         x0_samples = rng.uniform(-2, 2, size=(n, 2)).astype(np.float64)
         verbose_every = max(1, int(verbose_every))
 
@@ -242,11 +275,23 @@ def main():
 
 
 
-   # train_path = DATA_DIR / 'vdp_train.npz'
-   # test_path  = DATA_DIR / 'vdp_test.npz'
+    ''' 
+        
+        This determines which dataset to use
+        my_vdp_train and my_vdp_test are from Minduli's dataset and are 
+        N_TRAIN = 10_000
+        N_TEST  = 1_000
+        
+        From playing around, it seems as though a neural network needs more data than that 
+        of the smaller set and actually needs the full 10000 and 1000 dataset. 
+        
+    '''
 
-    train_path = Path(r"C:\Users\alexa\Git Projects\Tiny Recursive Control\my_vdp_train.npz")
-    test_path = Path(r"C:\Users\alexa\Git Projects\Tiny Recursive Control\my_vdp_test.npz")
+    train_path = DATA_DIR / 'vdp_train.npz'
+    test_path  = DATA_DIR / 'vdp_test.npz'
+
+   #  train_path = Path(r"C:\Users\alexa\Git Projects\Tiny Recursive Control\my_vdp_train.npz")
+   #  test_path = Path(r"C:\Users\alexa\Git Projects\Tiny Recursive Control\my_vdp_test.npz")
     
     
     
@@ -327,7 +372,10 @@ def main():
     
     
     task = TaskConfig(state_dim=2, control_dim=1, horizon=T, dt=DT, u_min=U_MIN, u_max=U_MAX)
+    '''
     
+    Here to change how many iterations K
+    '''
     if QUICK:
         net = NetConfig(d_z=64, d_h=128, n_heads=4, n_blocks=1, K=2, n_inner=2)
     else:
@@ -348,14 +396,16 @@ def main():
     )
     
     criterion = TRCLoss(lambda_ps=LAMBDA_PS)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-
     warmup_epochs = 5
+    # Safety: warmup can never meet or exceed total epochs
+    warmup_epochs = min(warmup_epochs, max(1, EPOCHS - 1))
+    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+    
     warmup = LinearLR(optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs)
-    cosine = CosineAnnealingLR(optimizer, T_max=EPOCHS - warmup_epochs, eta_min=1e-5)
+    cosine = CosineAnnealingLR(optimizer, T_max=max(1, EPOCHS - warmup_epochs), eta_min=1e-5)
     
     scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
-
     scaler = torch.amp.GradScaler("cuda", enabled=use_cuda)
     amp_dtype = torch.bfloat16 if (use_cuda and torch.cuda.is_bf16_supported()) else torch.float16
     
@@ -455,8 +505,8 @@ def main():
         else:
             marker = ''
     
-        # if use_cuda:
-        #     torch.cuda.synchronize()
+        if use_cuda:
+            torch.cuda.synchronize()
         dt = time.time() - t0
         print(f'Epoch {epoch:3d}/{EPOCHS}  train_ctrl={train_ctrl:.4f}  imp={train_imp:.3f}  '
               f'val_ctrl={val_ctrl:.4f}  val_imp={val_imp:.3f}  ({dt:.1f}s){marker}')
@@ -490,7 +540,7 @@ def main():
     fig.suptitle('Fig. 2: Training Convergence', fontsize=14)
     plt.tight_layout(); plt.show()
     
-    COLORS = ['#7b2d8e', '#2b8f8f', '#4ca64c', '#d4b830']
+    COLORS = ['#7b2d8e', '#2b8f8f', '#4ca64c', '#d4b830', '#C44E52']
     
     
     
@@ -533,6 +583,9 @@ def main():
     u_iters = [u.cpu().numpy() for u in out['u_iterations']]
     costs   = [c.cpu().numpy() for c in out['costs']]
     z_H     = [z.cpu().numpy() for z in out['z_H_history']]
+    
+
+    
     K = len(u_iters) - 1
     
     print(f'Test samples: {len(opt_costs)}')
@@ -567,9 +620,13 @@ def main():
     fig.suptitle('Fig. 3: Trajectory Results', fontsize=14)
     plt.tight_layout(); plt.show()
     
-    # --- Figure 4: Iterative refinement ---
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
     
+    
+    
+    # --- Figure 4: Iterative refinement ---
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+   
     for k in range(K+1):
         ctrl = u_iters[k][:, :, 0]
         med = np.median(ctrl, axis=0)

@@ -48,7 +48,7 @@ class NetConfig:
     d_h: int = 512          # hidden dimension in MLPs
     n_heads: int = 8        # attention heads
     n_blocks: int = 3       # transformer blocks per reasoning call (L)
-    K: int = 3            # outer refinement iterations
+    K: int = 3              # outer refinement iterations
     n_inner: int = 4        # inner tactical cycles per iteration (n)
     dropout: float = 0.0
 
